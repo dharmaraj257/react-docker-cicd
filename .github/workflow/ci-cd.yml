@@ -1,4 +1,3 @@
-
 name: React Docker CI/CD
 
 on:
@@ -9,52 +8,119 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
-concurrency:
-  group: react-docker-deployment
-  cancel-in-progress: false
+env:
+  REGISTRY: ghcr.io
 
 jobs:
-  build-and-deploy:
-    name: Build and Deploy on Ubuntu Runner
-    runs-on: self-hosted
-    timeout-minutes: 20
+  build-and-push:
+    name: Build, Test and Publish
+    runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.image.outputs.name }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Verify runner and Docker
-        run: |
-          echo "Runner: $RUNNER_NAME"
-          echo "Operating system: $RUNNER_OS"
-          docker --version
-          docker info
-          docker ps
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
 
-      - name: Build React Docker image
-        run: |
-          docker build \
-            -t react-app:${GITHUB_SHA} \
-            -t react-app:latest .
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Remove previous container
+      - name: Build React application
+        run: npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set image name
+        id: image
+        shell: bash
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+
+      - name: Verify published image
+        run: |
+          docker pull "${{ steps.image.outputs.name }}:${{ github.sha }}"
+          docker run -d --name react-test -p 127.0.0.1:8080:80 \
+            "${{ steps.image.outputs.name }}:${{ github.sha }}"
+          trap 'docker rm -f react-test >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 15); do
+            if curl --fail --silent http://localhost:8080/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs react-test
+          exit 1
+
+  deploy:
+    name: Deploy to Linux Server
+    needs: build-and-push
+
+    # Configure this runner on your own Linux deployment machine.
+    runs-on: [self-hosted, linux, x64]
+
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull new Docker image
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          TAG: ${{ github.sha }}
+        run: docker pull "$IMAGE:$TAG"
+
+      - name: Deploy container
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          TAG: ${{ github.sha }}
+        shell: bash
         run: |
           docker rm -f react-app || true
 
-      - name: Deploy application
-        run: |
           docker run -d \
             --name react-app \
             --restart unless-stopped \
             -p 8080:80 \
-            react-app:${GITHUB_SHA}
+            "$IMAGE:$TAG"
 
       - name: Verify deployment
         run: |
           for i in $(seq 1 15); do
-            if curl -fsS http://localhost:8080/ >/dev/null; then
-              echo "Deployment successful!"
+            if curl --fail --silent http://localhost:8080/health; then
               exit 0
             fi
             sleep 2
