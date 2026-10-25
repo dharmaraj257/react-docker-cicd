@@ -54,7 +54,7 @@ jobs:
 
   deploy:
     name: Deploy to Linux Server
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build-and-push
 
     steps:
