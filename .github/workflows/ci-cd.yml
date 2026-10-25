@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: DOCKERHUB_USERNAME/react-docker-cicd
+  IMAGE_NAME: dharmaraj257/react-docker-cicd
 
 jobs:
   build-and-push:
