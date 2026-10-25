@@ -1,5 +1,4 @@
-
-name: React Docker CI-CD
+name: React Docker CI/CD
 
 on:
   push:
@@ -10,76 +9,79 @@ on:
 permissions:
   contents: read
 
-env:
-  IMAGE_NAME: dharmaraj257/react-docker-cicd
+concurrency:
+  group: react-docker-deployment
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Image
-    runs-on: self-hosted
+  build-and-deploy:
+    name: Build and Deploy React
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout source code
+      # 1. Download source code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
+      # 2. Verify Ubuntu and Docker
+      - name: Check environment
+        run: |
+          set -e
+          echo "Runner: $(hostname)"
+          echo "User: $(whoami)"
+          docker --version
+          docker info
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build React application
-        run: npm run build
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
-
-  deploy:
-    name: Deploy to Linux Server
-    runs-on: self-hosted
-    needs: build-and-push
-
-    steps:
-      - name: Deploy over SSH
-        uses: self-hosted
+      # 3. Build the React production image
+      - name: Build Docker image
         env:
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
           IMAGE_TAG: ${{ github.sha }}
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          envs: IMAGE_NAME,IMAGE_TAG
-          script: |
-            set -eu
+        run: |
+          set -e
+          docker build --pull \
+            -t "react-app:${IMAGE_TAG}" \
+            .
 
-            docker pull "$IMAGE_NAME:$IMAGE_TAG"
+      # 4. Replace the running application
+      - name: Deploy React container
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
 
-            docker rm -f react-app 2>/dev/null || true
+          docker rm -f react-app 2>/dev/null || true
 
-            docker run -d \
-              --name react-app \
-              --restart unless-stopped \
-              -p 80:80 \
-              "$IMAGE_NAME:$IMAGE_TAG"
+          docker run -d \
+            --name react-app \
+            --restart unless-stopped \
+            -p 8080:80 \
+            "react-app:${IMAGE_TAG}"
 
-            docker image prune -f
+      # 5. Verify the application responds
+      - name: Verify deployment
+        run: |
+          set -e
+
+          for attempt in $(seq 1 15); do
+            if curl --fail --silent \
+              http://127.0.0.1:8080/ \
+              -o /dev/null; then
+              echo "SUCCESS: React application is responding"
+              docker ps --filter name=react-app
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "ERROR: React application did not respond"
+          docker logs --tail 100 react-app
+          exit 1
+
+      # 6. Show logs if any step fails
+      - name: Troubleshoot deployment
+        if: failure()
+        run: |
+          docker ps -a --filter name=react-app || true
+          docker logs --tail 100 react-app || true
