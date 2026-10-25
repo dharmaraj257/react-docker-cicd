@@ -1,3 +1,4 @@
+
 name: React Docker CI/CD
 
 on:
@@ -15,73 +16,49 @@ concurrency:
 
 jobs:
   build-and-deploy:
-    name: Build and Deploy React
-    runs-on: [self-hosted, Linux, X64]
+    name: Build and Deploy on Ubuntu Runner
+    runs-on: self-hosted
     timeout-minutes: 20
 
     steps:
-      # 1. Download source code
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Verify Ubuntu and Docker
-      - name: Check environment
+      - name: Verify runner and Docker
         run: |
-          set -e
-          echo "Runner: $(hostname)"
-          echo "User: $(whoami)"
+          echo "Runner: $RUNNER_NAME"
+          echo "Operating system: $RUNNER_OS"
           docker --version
           docker info
+          docker ps
 
-      # 3. Build the React production image
-      - name: Build Docker image
-        env:
-          IMAGE_TAG: ${{ github.sha }}
+      - name: Build React Docker image
         run: |
-          set -e
-          docker build --pull \
-            -t "react-app:${IMAGE_TAG}" \
-            .
+          docker build \
+            -t react-app:${GITHUB_SHA} \
+            -t react-app:latest .
 
-      # 4. Replace the running application
-      - name: Deploy React container
-        env:
-          IMAGE_TAG: ${{ github.sha }}
+      - name: Remove previous container
         run: |
-          set -e
+          docker rm -f react-app || true
 
-          docker rm -f react-app 2>/dev/null || true
-
+      - name: Deploy application
+        run: |
           docker run -d \
             --name react-app \
             --restart unless-stopped \
             -p 8080:80 \
-            "react-app:${IMAGE_TAG}"
+            react-app:${GITHUB_SHA}
 
-      # 5. Verify the application responds
       - name: Verify deployment
         run: |
-          set -e
-
-          for attempt in $(seq 1 15); do
-            if curl --fail --silent \
-              http://127.0.0.1:8080/ \
-              -o /dev/null; then
-              echo "SUCCESS: React application is responding"
-              docker ps --filter name=react-app
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8080/ >/dev/null; then
+              echo "Deployment successful!"
               exit 0
             fi
-
             sleep 2
           done
 
-          echo "ERROR: React application did not respond"
-          docker logs --tail 100 react-app
+          docker logs react-app
           exit 1
-
-      # 6. Show logs if any step fails
-      - name: Troubleshoot deployment
-        if: failure()
-        run: |
-          docker ps -a --filter name=react-app || true
-          docker logs --tail 100 react-app || true
